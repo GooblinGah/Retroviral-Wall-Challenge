@@ -9,15 +9,18 @@ Architecture:
     Fit Ridge(alpha=100) on all features, outer-train only -> predict held-out family
 
 Config choices (fixed by domain knowledge, not CV-selected):
-  - Features:  36 biophysical (structural, thermodynamic, sequence properties)
+  - Features:  36 biophysical + 2 nonlinear transforms (net_charge^2, log_perplexity)
   - Target:    log(efficiency + 1)  -- skewed distribution (36 zeros, max 41%)
   - Weights:   efficiency + 0.1     -- aligns with WSpearman eval metric
 
 Feature set rationale:
+  36 biophysical features covering catalytic geometry, thermostability, ESM-IF
+  scores, physicochemical properties, active site environment, and electrostatics.
+  Two nonlinear transforms added: net_charge^2 (extreme charge penalty) and
+  log(perplexity) (compresses heavy-tailed sequence-structure mismatch).
   BLOSUM local similarity and PE2 pentamutant scores were tested but excluded
-  because they correlate with family membership and degrade LOFO performance
-  (CLS 0.521 with MMLV features vs 0.588 without). Controls confirm MMLV-
-  anchored features carry no cross-family signal (CLS=0.000 alone).
+  because they correlate with family membership and degrade LOFO performance.
+  Controls confirm MMLV-anchored features carry no cross-family signal.
 
 External data:
   - BLOSUM62 substitution matrix (Henikoff & Henikoff, 1992) — used in controls
@@ -145,6 +148,22 @@ def get_biophys_features(df):
                 X[col].replace({"TRUE": 1, "FALSE": 0, "True": 1, "False": 0}),
                 errors="coerce"
             )
+
+    # Nonlinear transforms — domain-justified, not data-selected.
+    #
+    # net_charge^2: Extreme net charge (positive or negative) causes
+    # aggregation and membrane interaction problems. Function degrades
+    # nonlinearly with deviation from moderate charge.
+    if "net_charge" in X.columns:
+        X["net_charge_sq"] = X["net_charge"] ** 2
+    #
+    # log(perplexity): ESM-IF perplexity is heavy-tailed (range 1-17).
+    # Sequence-structure mismatch degrades enzyme function, but the
+    # relationship saturates — going from perplexity 2→4 matters more
+    # than 12→14. Log compression captures this.
+    if "perplexity" in X.columns:
+        X["log_perplexity"] = np.log1p(X["perplexity"])
+
     return X
 
 
@@ -364,7 +383,7 @@ def main():
     print("=" * 65)
     print()
     print("Config (domain-justified):")
-    print("  Features:  36 biophysical (structural, thermo, sequence)")
+    print("  Features:  36 biophysical + 2 nonlinear (net_charge^2, log_perplexity)")
     print("  Target:    log(efficiency + 1)  [skewed distribution]")
     print("  Weights:   efficiency + 0.1     [matches WSpearman metric]")
     print(f"  Model:     Ridge (alpha={RIDGE_ALPHA}, fixed)")
