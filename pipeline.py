@@ -9,17 +9,20 @@ Architecture:
     Fit Ridge(alpha=100) on all features, outer-train only -> predict held-out family
 
 Config choices (fixed by domain knowledge, not CV-selected):
-  - Features:  36 biophysical + 2 nonlinear transforms (net_charge^2, log_perplexity)
+  - Features:  36 biophysical + 2 structural + 2 nonlinear transforms = 40 total
   - Target:    log(efficiency + 1)  -- skewed distribution (36 zeros, max 41%)
   - Weights:   efficiency + 0.1     -- aligns with WSpearman eval metric
 
 Feature set rationale:
   36 biophysical features covering catalytic geometry, thermostability, ESM-IF
   scores, physicochemical properties, active site environment, and electrostatics.
-  Two nonlinear transforms added: net_charge^2 (extreme charge penalty) and
-  log(perplexity) (compresses heavy-tailed sequence-structure mismatch).
-  BLOSUM local similarity and PE2 pentamutant scores were tested but excluded
-  because they correlate with family membership and degrade LOFO performance.
+  2 structural features computed from PDB Cα coordinates: radius_of_gyration
+  (fold compactness — functional RTs are large multi-domain proteins) and
+  long_range_contact_frac (domain organization — fingers/palm/thumb architecture
+  requires many cross-domain contacts). 2 nonlinear transforms: net_charge^2
+  (extreme charge penalty) and log(perplexity) (compresses heavy-tailed
+  sequence-structure mismatch). BLOSUM local similarity and PE2 pentamutant
+  scores were tested but excluded because they correlate with family membership.
   Controls confirm MMLV-anchored features carry no cross-family signal.
 
 External data:
@@ -118,6 +121,32 @@ BIOPHYS_CORE = [
 ]
 
 
+def _compute_structural_features(pdb_path):
+    """Compute radius of gyration and long-range contact fraction from PDB Cα atoms."""
+    coords = []
+    with open(pdb_path) as f:
+        for line in f:
+            if line.startswith("ATOM") and " CA " in line:
+                coords.append([float(line[30:38]), float(line[38:46]), float(line[46:54])])
+    coords = np.array(coords)
+    n = len(coords)
+    if n < 10:
+        return np.nan, np.nan
+
+    center = coords.mean(axis=0)
+    rg = float(np.sqrt(np.mean(np.sum((coords - center) ** 2, axis=1))))
+
+    dists = np.sqrt(np.sum((coords[:, None, :] - coords[None, :, :]) ** 2, axis=2))
+    seq_sep = np.abs(np.arange(n)[:, None] - np.arange(n)[None, :])
+    contacts = (dists < 8.0) & (seq_sep > 2)
+    i_idx, j_idx = np.where(np.triu(contacts, k=3))
+    if len(i_idx) == 0:
+        return rg, np.nan
+    seps = np.abs(i_idx - j_idx)
+    lr_frac = float((seps > 12).sum() / len(seps))
+    return rg, lr_frac
+
+
 def load_data():
     seq_df = pd.read_csv("data/rt_sequences.csv")
     feat_df = pd.read_csv("data/handcrafted_features.csv")
@@ -136,6 +165,21 @@ def load_data():
     df["family"] = df["rt_name"].map(family_map)
     if "rt_family" in df.columns:
         df["family"] = df["family"].fillna(df["rt_family"])
+
+    from pathlib import Path
+    struct_dir = Path("data/structures")
+    rg_vals, lr_vals = [], []
+    for _, row in df.iterrows():
+        pdb = struct_dir / f"{row['rt_name']}.pdb"
+        if pdb.exists():
+            rg, lr = _compute_structural_features(str(pdb))
+        else:
+            rg, lr = np.nan, np.nan
+        rg_vals.append(rg)
+        lr_vals.append(lr)
+    df["radius_of_gyration"] = rg_vals
+    df["long_range_contact_frac"] = lr_vals
+
     return df
 
 
@@ -148,6 +192,21 @@ def get_biophys_features(df):
                 X[col].replace({"TRUE": 1, "FALSE": 0, "True": 1, "False": 0}),
                 errors="coerce"
             )
+
+    # Structural features computed from PDB Cα coordinates.
+    #
+    # radius_of_gyration: fold compactness. Functional RTs are large
+    # multi-domain proteins (fingers-palm-thumb-connection) with a
+    # specific overall shape. Compactness correlates with proper folding.
+    if "radius_of_gyration" in df.columns:
+        X["radius_of_gyration"] = pd.to_numeric(df["radius_of_gyration"], errors="coerce").values
+    #
+    # long_range_contact_frac: fraction of Cα contacts between residues
+    # >12 apart in sequence. Measures domain organization — the RT
+    # architecture requires extensive cross-domain contacts between
+    # fingers, palm, and thumb subdomains.
+    if "long_range_contact_frac" in df.columns:
+        X["long_range_contact_frac"] = pd.to_numeric(df["long_range_contact_frac"], errors="coerce").values
 
     # Nonlinear transforms — domain-justified, not data-selected.
     #
@@ -343,6 +402,21 @@ def fit_final_model(df, X, ridge_alpha):
 
 def predict_new(model, df_new):
     """Score new RT candidates using a fitted model."""
+    from pathlib import Path
+    struct_dir = Path("data/structures")
+    if "radius_of_gyration" not in df_new.columns:
+        rg_vals, lr_vals = [], []
+        for _, row in df_new.iterrows():
+            pdb = struct_dir / f"{row['rt_name']}.pdb"
+            if pdb.exists():
+                rg, lr = _compute_structural_features(str(pdb))
+            else:
+                rg, lr = np.nan, np.nan
+            rg_vals.append(rg)
+            lr_vals.append(lr)
+        df_new = df_new.copy()
+        df_new["radius_of_gyration"] = rg_vals
+        df_new["long_range_contact_frac"] = lr_vals
     X_new = get_biophys_features(df_new)
     X_arr = X_new.values.astype(float)
 
@@ -383,7 +457,7 @@ def main():
     print("=" * 65)
     print()
     print("Config (domain-justified):")
-    print("  Features:  36 biophysical + 2 nonlinear (net_charge^2, log_perplexity)")
+    print("  Features:  36 biophys + 2 structural + 2 nonlinear = 40 total")
     print("  Target:    log(efficiency + 1)  [skewed distribution]")
     print("  Weights:   efficiency + 0.1     [matches WSpearman metric]")
     print(f"  Model:     Ridge (alpha={RIDGE_ALPHA}, fixed)")
