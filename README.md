@@ -208,6 +208,25 @@ Here are the approaches we've tested on leave-one-family-out:
 | HandCrafted + RF (d=10) | 0.596 | 0.217 | 0.318 | Current best |
 | HandCrafted + LogReg (C=0.01) | 0.460 | 0.000 | 0.000 | Classification only |
 | PLS + LightGBM LambdaRank | 0.659 | 0.000 | 0.000 | Best PR-AUC, but no ranking |
+| **This submission: Ridge + biophys/structure/pLDDT/nonlinear** | **0.725** | **0.626** | **0.672** | Fixed alpha, LOFO-only preprocessing, family controls pass |
+
+### Current Submission Architecture
+
+The final selected model is deliberately simple: `Ridge(alpha=100)` trained on `log1p(pe_efficiency_pct)` with `pe_efficiency_pct + 0.1` sample weights. All imputation and scaling are fit inside each LOFO training fold before predicting the held-out family.
+
+The feature set contains 46 deterministic, label-independent features:
+
+- 36 curated biophysical features covering catalytic geometry, thermostability, ESM-IF sequence-structure fit, physicochemical properties, active-site environment, and electrostatics.
+- 5 structure-derived features from ESMFold PDBs: radius of gyration, long-range contact fraction, mean pLDDT, catalytic-site pLDDT, and fraction of high-confidence residues.
+- 5 domain-justified nonlinear transforms: `net_charge_sq`, `log_perplexity`, `t40_minus_t60`, `inv_instability`, and `triad_x_loglik`.
+
+Audited alternatives were implemented and rejected by pre-declared gates: multi-alpha Ridge (`CLS=0.666`), hurdle classification/regression (`CLS=0.635`), rank-target Ridge (`CLS=0.509`), family-residualized heads (`CLS=0.336`), nested ElasticNet (`CLS=0.434`), and active-site ESM-2 PCA embeddings (`CLS=0.509`). The selected model remains the highest-scoring no-leakage variant.
+
+Additional validation:
+
+- Family-memorization controls: MMLV-anchored features alone give `CLS=0.000`; adding them to the full model hurts (`CLS=0.628`), supporting that the final signal is not MMLV/family memorization.
+- Permutation test on fixed OOF predictions: null mean `CLS=0.096`, 95th percentile `0.358`, observed `0.672`, `p=0.001`.
+- Retroviral held-out fold remains the main uncertainty: `PR-AUC=0.882`, `WSpearman=0.174`, with false positives `FENV1-RT`, `IPMA-RT`, `WDSV-RT` and false negative `ASLV-RT`.
 
 ---
 
